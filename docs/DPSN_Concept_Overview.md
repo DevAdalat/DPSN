@@ -57,5 +57,19 @@ When a user interacts with the finished model, the process is dynamic:
     *   **Action:** Fetches 5,000 weights related to physics and language.
     *   **Result:** Detailed, high-compute response.
 
+## 5. Key Advantages (Why This Matters)
+
+### For Training (Building the Model)
+1.  **Infinite Memory:** You can make the Library (Pool) as big as you want without making the "Reader" (Executor) slower. You can train a model with 1 Trillion parameters but only compute 1 Billion at a time.
+2.  **No Forgetting:** Since only active parameters get updated, the model doesn't overwrite old skills when learning new ones. It solves the "Catastrophic Forgetting" problem naturally.
+
+### For Inference (Using the Model)
+1.  **The "Stopword" Economy:** The model doesn't waste energy on simple words like "the" or ".". It adapts its effort instantly, saving massive amounts of compute.
+2.  **Combinatorial Creativity:** By picking individual weights instead of fixed blocks (like MoE), the model can combine "Physics" weights and "Poetry" weights to explain "Quantum Physics in a Poem," creating a bespoke network for that exact request.
+
+## 6. Technical Assessment
+*   **The Paradigm Shift:** This is effectively a **Differentiable Search Engine**. The model queries its own parameter database to construct a computation graph for every token.
+*   **The Challenge:** Scaling the Router to search billions of parameters efficiently (without checking them one by one) is the next big engineering hurdle (solved by Hierarchical Routing).
+
 ### Summary
 This architecture creates a **Modular Brain**. Instead of one giant block of math, you have a Router that dynamically assembles a custom mini-brain on the fly for every single input, optimizing both knowledge storage and computational efficiency.

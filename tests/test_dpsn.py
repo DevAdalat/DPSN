@@ -11,23 +11,25 @@ from dpsn import DPSN
 def test_dpsn():
     print("Initializing DPSN...")
     input_dim = 64  # Small dim for test
-    memory_size = 1000  # Small memory for test
-    model = DPSN(input_dim=input_dim, memory_size=memory_size)
+    pool_size = 1000  # Small memory for test
+    model = DPSN(input_dim=input_dim, pool_size=pool_size)
 
     # Create dummy input
     batch_size = 2
     x = torch.randn(batch_size, input_dim)
 
     print("\nRunning Forward Pass...")
-    output, stats = model(x)
+    results = model(x)
+    output = results["output"]
 
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {output.shape}")
 
-    for i, stat in enumerate(stats):
-        print(
-            f"Sample {i}: Complexity={stat['complexity']:.4f}, Selected Params={stat['num_selected']}"
-        )
+    # Inspect batch stats
+    complexity_scores = results["complexity_score"]
+    budget = results["parameters_used"]
+    print(f"Batch Budget Used: {budget}")
+    print(f"Complexity Scores: {complexity_scores.flatten().tolist()}")
 
     # Check if output is different from input (transformation happened)
     diff = (output - x).abs().mean()

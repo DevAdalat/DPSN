@@ -3,3 +3,6 @@ numpy
 transformers
 datasets
 psutil
+pytest
+pytest-benchmark
+matplotlib
