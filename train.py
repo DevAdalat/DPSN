@@ -132,6 +132,17 @@ def parse_args():
         help="Path to checkpoint to resume from",
     )
 
+    # Performance params
+    parser.add_argument(
+        "--num_workers", type=int, default=4, help="Number of data loader workers"
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=5,
+        help="Number of batches to prefetch per worker",
+    )
+
     return parser.parse_args()
 
 
