@@ -1,10 +1,14 @@
 #!/bin/bash
 
 # Configuration for 1B total parameters model training
-# Note: "1B Pool Size" usually refers to the number of parameter slots.
-# Assuming input_dim=768 (default), 1M pool size = 768M params.
-# To get approx 1B total parameters, we use pool_size=1,300,000 (~1B params)
-# Router is kept small (~200M params with hidden=256).
+# Note: "1B Pool Size" refers to the TOTAL number of parameters in the model.
+# Since the pool is replicated across n_layer (12) blocks, we need to divide the total target by n_layer.
+# Target: ~1.2B params (1B pool + 0.2B router/others).
+# To fit in 15GB VRAM (T4), we need to be careful.
+# Params per layer = 83.3M params.
+# Pool size (entries) = 83.3M / 768 (input_dim) ≈ 108,500.
+# REDUCED to 90,000 to prevent OOM on 16GB cards.
+# New Total Params ≈ 1.25B (Safe for T4 with AMP).
 
 # Run training
 python train.py \
@@ -16,12 +20,12 @@ python train.py \
     --n_head 12 \
     --n_embd 768 \
     --block_size 1024 \
-    --pool_size 1300000 \
+    --pool_size 90000 \
     --router_hidden_dim 256 \
     --min_params 100 \
     --max_params 5000 \
-    --batch_size 8 \
-    --gradient_accumulation_steps 4 \
+    --batch_size 1 \
+    --gradient_accumulation_steps 32 \
     --max_steps 50000 \
     --learning_rate 3e-4 \
     --pool_lr_mult 10.0 \

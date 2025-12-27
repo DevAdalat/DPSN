@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from torch.amp import autocast, GradScaler
 
 from dpsn.models.language_model import DPSNLanguageModel
 from config.hyperparameters import LanguageModelConfig
@@ -17,7 +18,6 @@ def parse_args():
         description="Train DPSN Model on HuggingFace Dataset"
     )
 
-    # Data params
     parser.add_argument(
         "--dataset_name",
         type=str,
@@ -43,7 +43,6 @@ def parse_args():
         "--tokenizer_name", type=str, default="gpt2", help="Pretrained tokenizer to use"
     )
 
-    # Model params
     parser.add_argument(
         "--n_layer", type=int, default=12, help="Number of transformer layers"
     )
@@ -58,7 +57,6 @@ def parse_args():
         "--dropout", type=float, default=0.1, help="Dropout probability"
     )
 
-    # DPSN params
     parser.add_argument(
         "--pool_size",
         type=int,
@@ -87,7 +85,6 @@ def parse_args():
         help="Exponent for complexity scaling",
     )
 
-    # Training params
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -132,7 +129,6 @@ def parse_args():
         help="Path to checkpoint to resume from",
     )
 
-    # Performance params
     parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loader workers"
     )
@@ -157,15 +153,17 @@ def get_device(device_arg):
     return device_arg
 
 
-def save_checkpoint(model, optimizer_router, optimizer_pool, step, loss, output_dir):
+def save_checkpoint(
+    model, optimizer_router, optimizer_pool, scaler, step, loss, output_dir
+):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"checkpoint_step_{step}.pt")
 
-    # Save model state
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_router_state_dict": optimizer_router.state_dict(),
         "optimizer_pool_state_dict": optimizer_pool.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
         "step": step,
         "loss": loss,
     }
@@ -173,12 +171,25 @@ def save_checkpoint(model, optimizer_router, optimizer_pool, step, loss, output_
     print(f"Saved checkpoint to {path}")
 
 
+def log_gpu_memory(label, device):
+    if device == "cuda":
+        allocated = torch.cuda.memory_allocated() / (1024**3)
+        reserved = torch.cuda.memory_reserved() / (1024**3)
+        max_allocated = torch.cuda.max_memory_allocated() / (1024**3)
+        print(
+            f"[{label}] Memory: Allocated={allocated:.2f}GB, "
+            f"Reserved={reserved:.2f}GB, Max={max_allocated:.2f}GB"
+        )
+
+
 def train():
     args = parse_args()
     device = get_device(args.device)
     print(f"Using device: {device}")
 
-    # 1. Setup Data Loading (Streaming)
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
     print(f"Loading tokenizer: {args.tokenizer_name}")
     print(f"Loading dataset: {args.dataset_name} (streaming)")
 
@@ -194,7 +205,6 @@ def train():
         prefetch_factor=args.prefetch_factor,
     )
 
-    # 2. Initialize Model
     print("Initializing DPSN Model...")
     config = LanguageModelConfig(
         vocab_size=vocab_size,
@@ -217,8 +227,6 @@ def train():
     model.to(device)
     print(f"Model Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
-    # 3. Optimizers
-    # Split parameters into pool (SGD) and rest (AdamW)
     pool_params = []
     for block in model.blocks:
         pool_params.extend(list(block.dpsn.pool.parameters()))
@@ -231,7 +239,8 @@ def train():
     )
     optimizer_pool = optim.SGD(pool_params, lr=args.learning_rate * args.pool_lr_mult)
 
-    # Resume if requested
+    scaler = GradScaler()
+
     start_step = 0
     if args.resume_from:
         print(f"Resuming from {args.resume_from}...")
@@ -239,9 +248,10 @@ def train():
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer_router.load_state_dict(checkpoint["optimizer_router_state_dict"])
         optimizer_pool.load_state_dict(checkpoint["optimizer_pool_state_dict"])
+        if "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
         start_step = checkpoint["step"]
 
-    # 4. Training Loop
     model.train()
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "logs"))
 
@@ -253,45 +263,55 @@ def train():
     optimizer_pool.zero_grad()
 
     print("Starting Training...")
+    torch.cuda.reset_peak_memory_stats(device) if device == "cuda" else None
     t0 = time.time()
 
-    # Create iterator from loader
     data_iter = iter(train_loader)
 
     while step < args.max_steps:
+        log_gpu_memory("STEP START", device)
         try:
             batch = next(data_iter)
         except StopIteration:
-            # Restart iterator if dataset exhausted
             data_iter = iter(train_loader)
             batch = next(data_iter)
 
-        # Prepare inputs
         inputs = batch[:, :-1].to(device)
         targets = batch[:, 1:].to(device)
+        log_gpu_memory("DATA LOADED", device)
 
-        # Forward
-        logits, loss, stats = model(inputs, targets)
-        loss = loss / args.gradient_accumulation_steps
-        loss.backward()
+        with autocast(
+            device_type=device,
+            dtype=torch.float16 if device == "cuda" else torch.bfloat16,
+        ):
+            logits, loss, stats = model(inputs, targets)
+            loss = loss / args.gradient_accumulation_steps
+
+        log_gpu_memory("FORWARD PASS", device)
+
+        scaler.scale(loss).backward()
+        log_gpu_memory("BACKWARD PASS", device)
 
         running_loss += loss.item() * args.gradient_accumulation_steps
         accum_steps += 1
 
         if accum_steps % args.gradient_accumulation_steps == 0:
-            # Clip Grads
+            scaler.unscale_(optimizer_router)
+            scaler.unscale_(optimizer_pool)
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-            # Step
-            optimizer_router.step()
-            optimizer_pool.step()
+            scaler.step(optimizer_router)
+            scaler.step(optimizer_pool)
+
+            scaler.update()
+            log_gpu_memory("OPTIMIZER STEP", device)
 
             optimizer_router.zero_grad()
             optimizer_pool.zero_grad()
 
             step += 1
 
-            # Logging
             if step % args.log_interval == 0:
                 t1 = time.time()
                 dt = t1 - t0
@@ -301,7 +321,6 @@ def train():
                 ) / dt
                 avg_loss = running_loss / args.log_interval
 
-                # Extract DPSN stats
                 avg_params = sum(s["parameters_used"] for s in stats) / len(stats)
                 avg_complexity = sum(
                     s["complexity_score"].mean().item() for s in stats
@@ -320,19 +339,21 @@ def train():
 
                 running_loss = 0.0
 
-            # Saving
             if step % args.save_interval == 0:
                 save_checkpoint(
                     model,
                     optimizer_router,
                     optimizer_pool,
+                    scaler,
                     step,
                     avg_loss,
                     args.output_dir,
                 )
 
     print("Training Complete.")
-    save_checkpoint(model, optimizer_router, optimizer_pool, step, 0.0, args.output_dir)
+    save_checkpoint(
+        model, optimizer_router, optimizer_pool, scaler, step, 0.0, args.output_dir
+    )
     writer.close()
 
 

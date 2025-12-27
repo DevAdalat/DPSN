@@ -72,9 +72,12 @@ class StreamingTextDataset(IterableDataset):
             if not buffer:
                 break
 
-            # Tokenize buffer in batch for speed
             tokenized_buffer = self.tokenizer(
-                buffer, truncation=False, padding=False, return_attention_mask=False
+                buffer,
+                truncation=True,
+                max_length=self.seq_len * 8,
+                padding=False,
+                return_attention_mask=False,
             )["input_ids"]
 
             # Flatten
